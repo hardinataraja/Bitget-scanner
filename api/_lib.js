@@ -94,3 +94,12 @@ function send(res, status, body, cc) {
   res.status(status).json(body);
 }
 module.exports = { bg, getSymbols, getTickers, getCandles, send, GRAN, BASE };
+
+// GET /api/v2/spot/market/orderbook -> {asks:[[harga,ukuran]],bids:[...]}
+async function getBook(symbol) {
+  const r = await bg('/api/v2/spot/market/orderbook', { symbol, type: 'step0', limit: '20' }, 4000);
+  const fix = (a) => (Array.isArray(a) ? a.map((x) => [num(x[0]), num(x[1])]).filter((x) => x[0] > 0 && x[1] >= 0) : []);
+  const d = r.data || {};
+  return { asks: fix(d.asks).sort((a, b) => a[0] - b[0]), bids: fix(d.bids).sort((a, b) => b[0] - a[0]), t: r.t, stale: !!r.stale };
+}
+module.exports.getBook = getBook;
