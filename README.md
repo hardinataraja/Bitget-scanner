@@ -2,7 +2,7 @@
 
 Dashboard analisis Bitget Spot USDT untuk mendeteksi koin dengan tanda awal momentum/volume sebelum atau saat masuk Top Gainer. **Bukan saran investasi dan bukan prediksi harga.** Skor = kekuatan sinyal, bukan probabilitas profit.
 
-Stack: HTML5 + CSS3 + JavaScript vanilla, Bootstrap 5.3.3, Bootstrap Icons 1.11.3, Lightweight Charts 4.1.3 (semua via CDN jsDelivr), font JetBrains Mono (Google Fonts), Vercel Functions (Node 20). Tanpa database, tanpa API key.
+Stack: HTML5 + CSS3 + JavaScript vanilla, Bootstrap 5.3.3, Bootstrap Icons 1.11.3, Lightweight Charts 4.1.3 (semua via CDN jsDelivr), font JetBrains Mono (Google Fonts), Vercel Functions (Node 24.x). Tanpa database, tanpa API key.
 
 ## Struktur
 ```
@@ -66,3 +66,4 @@ Belum diuji (perlu Anda): panggilan live ke Bitget, WebSocket live & reconnect, 
 - Chart kosong: pair baru dengan histori <60 candle akan PROVISIONAL.
 - WS "RECONNECTING" terus: jaringan/ISP memblokir WebSocket; REST tetap berjalan.
 - Data tersimpan terhapus: localStorage hilang bila data situs dibersihkan.
+- Deploy gagal dengan pesan "Node.js Version ... is discontinued": pastikan `package.json` memuat `"engines": { "node": "24.x" }` (sudah diatur). Jika Vercel kelak mewajibkan versi lebih baru, ganti nilainya sesuai pesan di log.
