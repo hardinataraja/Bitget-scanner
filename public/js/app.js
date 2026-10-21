@@ -16,13 +16,13 @@ function status(sym) { const a = Scanner.open(sym); return a ? a.status : null; 
 function card(t) {
   const an = Scanner.scan.get(t.s), w = Watch.has(t.s), sc = an && an.score != null ? an.score : null, m = an ? an.m : {};
   const st = status(t.s) || Scoring.category(sc);
-  const note = an && an.provisional ? 'PROVISIONAL: ' + esc(an.reasons[0]) : !an ? 'Belum dipindai (antre scanner)' : '';
+  const note = an && an.provisional ? 'PROVISIONAL' + (sc != null ? '' : ': ' + esc(an.reasons[0] || '')) : !an ? 'Belum divalidasi' : 'analisis ' + ago(an.at) + ' lalu';
   return `<div class="coin"><div class="d-flex justify-content-between"><div><b>${esc(t.b)}</b><span class="dim">/USDT</span> <span class="tag">${esc(t.s)}</span></div>
   <div class="text-end"><div class="px">${fmtP(t.p)}</div><div class="${cls(t.ch24)}">24j ${fmtPct(t.ch24)}</div></div></div>
-  <div class="grid3"><span>1m <b class="dim">N/A</b></span><span>5m <b class="${cls(m.ch5)}">${fmtPct(pc(m.ch5))}</b></span><span>15m <b class="${cls(m.ch15)}">${fmtPct(pc(m.ch15))}</b></span>
+  <div class="grid3"><span>1m <b class="${cls(m.ch1)}">${fmtPct(pc(m.ch1))}</b></span><span>5m <b class="${cls(m.ch5)}">${fmtPct(pc(m.ch5))}</b></span><span>15m <b class="${cls(m.ch15)}">${fmtPct(pc(m.ch15))}</b></span>
   <span>Vol24 <b>${fmtV(t.v)}</b></span><span>RVOL <b>${m.rvol != null ? m.rvol.toFixed(1) + 'x' : 'N/A'}</b></span><span>Skor <b class="g">${sc == null ? 'N/A' : sc}</b></span></div>
   <div class="bar"><i style="width:${sc || 0}%"></i></div>
-  <div class="d-flex justify-content-between align-items-center"><span class="pill ${sc >= 70 ? 'on' : 'mid'}">${esc(st)}</span><span class="dim small">${note}</span>
+  <div class="d-flex justify-content-between align-items-center"><span class="pill ${sc >= 70 ? 'on' : 'mid'}">${esc(st)}</span><span class="dim small">${note}${m.R ? ' · R ' + fmtP(m.R) : ''}</span>
   <span><button class="btn-t" data-act="detail" data-s="${esc(t.s)}">Detail</button> <button class="btn-t ${w ? 'sel' : ''}" data-act="watch" data-s="${esc(t.s)}" aria-label="watchlist">${w ? '★' : '☆'}</button></span></div></div>`;
 }
 function table(rows, rank) {
@@ -34,21 +34,28 @@ function table(rows, rank) {
 const loading = () => '<div class="skel"></div><div class="skel"></div><div class="skel"></div>';
 const empty = (m) => `<div class="empty">${esc(m)}</div>`;
 
+function coverage() {
+  const now = Date.now(), all = [...S.tk.values()], el = all.filter((t) => t.v >= Store.s.minVol), fresh = el.filter((t) => Monitor.age(t.s, now) <= 30000), w = Ws.stats();
+  const sc = [...Scanner.scan.values()], rec = sc.filter((a) => now - a.at <= 900000).length, ages = fresh.map((t) => Monitor.age(t.s, now)).sort((a, b) => a - b);
+  return { total: all.length, elig: el.length, fresh: fresh.length, un: el.length - fresh.length, medAge: ages.length ? ages[ages.length >> 1] : null, ws: w, valid15: rec, queue: Scanner.st.queue, cand: Scanner.st.candidates || 0, factor: Scanner.factor };
+}
 function vDash() {
   if (!S.tk.size) return '<h2>dashboard</h2>' + (S.err ? empty('Gagal memuat data: ' + S.err) : loading());
-  const all = tkList(), c = Store.s, up = all.filter((t) => t.ch24 > 0).length, dn = all.filter((t) => t.ch24 < 0).length;
-  const sc = [...Scanner.scan.values()], open = Store.alerts.filter((a) => !a.closed && a.status !== 'INVALIDATED').length;
-  const spike = sc.filter((a) => a.m.rvol >= 2).length, brk = sc.filter((a) => a.m.breakout).length;
+  const all = tkList(), c = Store.s, up = all.filter((t) => t.ch24 > 0).length, dn = all.filter((t) => t.ch24 < 0).length, cv = coverage();
+  const sc = [...Scanner.scan.values()], open = Store.alerts.filter((a) => a.live !== false && !a.closed).length;
+  const spike = sc.filter((a) => a.m.rvol >= 2).length, brk = sc.filter((a) => a.m.brk === 'confirmed').length;
   const mov = all.filter((t) => t.v >= c.minVol && t.ch24 != null).sort((a, b) => Math.abs(b.ch24) - Math.abs(a.ch24)).slice(0, 5);
-  const volA = all.slice().sort((a, b) => b.v - a.v).slice(0, 5);
-  const feed = Store.alerts.slice(-5).reverse();
+  const volA = all.slice().sort((a, b) => b.v - a.v).slice(0, 5), feed = Store.alerts.slice(-5).reverse();
   return `<h2>dashboard</h2><div class="grid2">
-  <div class="stat">Pair dipantau<b>${all.length}</b></div><div class="stat">Sinyal aktif<b>${open}</b></div>
-  <div class="stat">Lonjakan volume<b>${scanned() ? spike : 'N/A'}</b><span class="dim small">RVOL≥2 dari ${sc.length} pair terpindai</span></div><div class="stat">Breakout<b>${scanned() ? brk : 'N/A'}</b><span class="dim small">dari ${sc.length} terpindai</span></div>
+  <div class="stat">Pair Spot USDT aktif<b>${all.length}</b></div><div class="stat">Sinyal aktif<b>${open}</b></div>
+  <div class="stat">Lonjakan volume<b>${sc.length ? spike : 'N/A'}</b><span class="dim small">RVOL≥2, dari ${sc.length} tervalidasi</span></div><div class="stat">Breakout terkonfirmasi<b>${sc.length ? brk : 'N/A'}</b><span class="dim small">dari ${sc.length} tervalidasi</span></div>
   <div class="stat">Naik / Turun<b><span class="up">${up}</span> / <span class="dn">${dn}</span></b></div><div class="stat">Koneksi<b>${esc($('#st-conn').textContent)}</b><span class="dim small">upd ${S.last ? hhmm(S.last) : 'N/A'}</span></div></div>
-  <div class="panel mt-2"><b>Perubahan terbesar (24j, vol≥min)</b>${mov.map((t) => `<div class="d-flex justify-content-between"><a href="#/coin/${esc(t.s)}">${esc(t.s)}</a><span class="${cls(t.ch24)}">${fmtPct(t.ch24)}</span></div>`).join('') || '<div class="dim">N/A</div>'}</div>
+  <div class="panel mt-2"><b>Coverage pemantauan</b><div class="small">Tahap A (ticker): <b class="g">${cv.fresh}</b> dari ${cv.elig} pair likuid (vol≥${fmtV(c.minVol)}) menerima data ≤30 dtk · <span class="${cv.un ? 'warn' : ''}">belum dipantau: ${cv.un}</span> · pair ilikuid di luar filter: ${cv.total - cv.elig}<br>
+  Umur data median: ${cv.medAge == null ? 'N/A' : Math.round(cv.medAge / 1000) + ' dtk'} · WebSocket: ${cv.ws.open}/${cv.ws.conns} koneksi, ${cv.ws.subscribed} pair${cv.ws.lastMsg ? ', pesan terakhir ' + ago(cv.ws.lastMsg) + ' lalu' : ''} · REST tiap ${c.refreshSec} dtk<br>
+  Tahap B (candle): ${cv.valid15} pair divalidasi ≤15 mnt terakhir · ${cv.cand} kandidat aktif · batch ${Math.round(c.batch * cv.factor)}/${c.scanSec}s${cv.factor < 1 ? ' <span class="warn">(throttle)</span>' : ''}<br><span class="dim">Seluruh pair likuid dipantau harganya; validasi candle hanya untuk kandidat, Top Gainer, watchlist, dan sampel.</span></div></div>
+  <div class="panel"><b>Perubahan terbesar (24j, vol≥min)</b>${mov.map((t) => `<div class="d-flex justify-content-between"><a href="#/coin/${esc(t.s)}">${esc(t.s)}</a><span class="${cls(t.ch24)}">${fmtPct(t.ch24)}</span></div>`).join('') || '<div class="dim">N/A</div>'}</div>
   <div class="panel"><b>Aktivitas volume (24j)</b>${volA.map((t) => `<div class="d-flex justify-content-between"><a href="#/coin/${esc(t.s)}">${esc(t.s)}</a><span>${fmtV(t.v)} USDT</span></div>`).join('')}</div>
-  <div class="panel"><b>Feed sinyal terbaru</b>${feed.map((a) => `<div>${hhmm(a.t0)} <a href="#/coin/${esc(a.s)}">${esc(a.s)}</a> <span class="pill on">${esc(a.status)}</span> skor ${a.score0}</div>`).join('') || '<div class="dim">Belum ada sinyal. Scanner memindai bertahap; sinyal muncul bila kriteria terpenuhi.</div>'}</div>`;
+  <div class="panel"><b>Feed sinyal terbaru</b>${feed.map((a) => `<div>${hhmm(a.t0)} <a href="#/coin/${esc(a.s)}">${esc(a.s)}</a> <span class="pill on">${esc(a.status)}</span> skor ${a.score0}</div>`).join('') || '<div class="dim">Belum ada sinyal.</div>'}</div>`;
 }
 const scanned = () => Scanner.scan.size > 0;
 
@@ -56,19 +63,24 @@ function vEarly() {
   const tabs = [['scan', 'Scanner'], ['alert', 'Alert'], ['eval', 'Evaluasi']].map(([k, l]) => `<button class="btn-t ${S.tab === k ? 'sel' : ''}" data-act="tab" data-k="${k}">${l}</button>`).join(' ');
   let body = '';
   if (S.tab === 'scan') {
-    const rows = [...Scanner.scan.entries()].filter(([s, a]) => a.score != null && S.tk.has(s)).map(([s, a]) => S.tk.get(s)).filter((t) => (Scanner.scan.get(t.s).m.rvol || 0) >= Store.s.minRvol && Scanner.scan.get(t.s).score >= Store.s.minScore && t.v >= Store.s.minVol && !(t.ch24 > Store.s.maxChange24)).sort((a, b) => Scanner.scan.get(b.s).score - Scanner.scan.get(a.s).score).slice(0, 40);
-    body = `<div class="dim small mb-2">Terpindai: ${Scanner.scan.size} pair (batch bergilir ${Store.s.batch}/${Store.s.scanSec}s). Filter: skor≥${Store.s.minScore}, RVOL≥${Store.s.minRvol}, 24j≤${Store.s.maxChange24}%.${Scanner.busy ? ' <span class="g">scan berjalan…</span>' : ''}${Scanner.lastErr ? ' <span class="warn">' + esc(Scanner.lastErr) + '</span>' : ''}</div>` + (rows.length ? table(rows) : S.tk.size ? empty(Scanner.scan.size ? 'Belum ada pair yang memenuhi filter saat ini.' : 'Scanner sedang mengumpulkan candle…') : loading());
+    const now = Date.now(), c = Store.s;
+    const cands = [...S.tk.values()].filter((t) => Scanner.quality(t, now)).map((t) => ({ t, p: Monitor.priority(t, now) })).filter((x) => x.p.pri >= 2).sort((a, b) => b.p.pri - a.p.pri).slice(0, 8);
+    const rows = [...Scanner.scan.entries()].filter(([s, a]) => a.score != null && S.tk.has(s)).map(([s]) => S.tk.get(s)).filter((t) => { const a = Scanner.scan.get(t.s); return (a.m.rvol || 0) >= c.minRvol && a.score >= c.minScore && t.v >= c.minVol && !(t.ch24 > c.maxChange24); }).sort((a, b) => Scanner.scan.get(b.s).score - Scanner.scan.get(a.s).score).slice(0, 40);
+    body = `<div class="panel small"><b>Kandidat momentum (Tahap A, belum tentu tervalidasi)</b>${cands.length ? cands.map((x) => `<div class="d-flex justify-content-between"><a href="#/coin/${esc(x.t.s)}">${esc(x.t.s)}</a><span>1m ${fmtPct(pc(x.p.d1))} · 5m ${fmtPct(pc(x.p.d5))} · vol ${x.p.vr != null ? x.p.vr.toFixed(1) + 'x' : 'N/A'} · pri ${x.p.pri.toFixed(1)}</span></div>`).join('') : '<span class="dim">Belum ada kandidat (butuh ±1–5 menit data sesi untuk menghitung perubahan jangka pendek).</span>'}</div>
+    <div class="dim small mb-2">Tervalidasi: ${Scanner.scan.size} pair. Filter: skor≥${c.minScore} (bukan provisional), RVOL≥${c.minRvol}, 24j≤${c.maxChange24}%.${Scanner.busy ? ' <span class="g">validasi berjalan…</span>' : ''}${Scanner.lastErr ? ' <span class="warn">' + esc(Scanner.lastErr) + '</span>' : ''}</div>` + (rows.length ? table(rows) : S.tk.size ? empty(Scanner.scan.size ? 'Belum ada pair yang memenuhi filter saat ini.' : 'Scanner sedang mengumpulkan candle…') : loading());
   } else if (S.tab === 'alert') {
     const al = Store.alerts.slice().reverse();
     body = al.length ? al.slice(0, 60).map((a) => { const ch = (a.last / a.p0 - 1) * 100; return `<div class="coin"><div class="d-flex justify-content-between"><b><a href="#/coin/${esc(a.s)}">${esc(a.s)}</a></b><span class="pill ${a.status === 'INVALIDATED' ? 'off' : 'on'}">${esc(a.status)}</span></div>
-      <div class="small dim">Terdeteksi ${new Date(a.t0).toLocaleString('id-ID')}</div><div class="grid3"><span>Harga sinyal<br><b>${fmtP(a.p0)}</b></span><span>Terakhir<br><b>${fmtP(a.last)}</b></span><span>Sejak sinyal<br><b class="${cls(ch)}">${fmtPct(ch)}</b></span><span>Skor awal<br><b>${a.score0}</b></span><span>RVOL<br><b>${a.rvol0 != null ? a.rvol0.toFixed(1) + 'x' : 'N/A'}</b></span><span>Skor kini<br><b>${a.score}</b></span></div>
-      <div class="small">${a.reasons.map(esc).join(' · ')}</div><div class="small warn">${a.warn.map(esc).join(' · ')}</div><div class="small dim">Invalidasi: ${esc(a.inval)}</div></div>`; }).join('') : empty('Belum ada alert. Alert dibuat saat pair pertama kali memenuhi kriteria (cooldown ' + Store.s.cooldownMin + ' menit per pair).');
+      <div class="small dim">Terdeteksi ${new Date(a.t0).toLocaleString('id-ID')} · umur data saat sinyal ${Math.round((a.dataAge || 0) / 1000)} dtk</div><div class="grid3"><span>Harga sinyal<br><b>${fmtP(a.p0)}</b></span><span>Terakhir<br><b>${fmtP(a.last)}</b></span><span>Sejak sinyal<br><b class="${cls(ch)}">${fmtPct(ch)}</b></span><span>Skor awal→kini<br><b>${a.score0}→${a.score}</b></span><span>RVOL<br><b>${a.rvol0 != null ? a.rvol0.toFixed(1) + 'x' : 'N/A'}</b></span><span>Resistance acuan<br><b>${a.R ? fmtP(a.R) : '—'}</b></span></div>
+      <div class="small">${a.reasons.map(esc).join(' · ')}</div><div class="small warn">${a.warn.map(esc).join(' · ')}</div><div class="small dim">Invalidasi: ${esc(a.inval)}${a.invReason ? '<br><b class="dn">Alasan: ' + esc(a.invReason) + '</b>' : ''}</div></div>`; }).join('') : empty('Belum ada alert. Alert dibuat saat pair pertama kali memenuhi kriteria (cooldown ' + Store.s.cooldownMin + ' menit per pair).');
     body += '<div class="dim small">Alert tersimpan di browser ini (localStorage) dan hanya aktif selama aplikasi terbuka.</div>';
   } else {
-    const done = Store.alerts.filter((a) => a.h[5] != null);
-    const row = (a) => `<tr><td>${esc(a.s)}</td>${[5, 15, 60].map((h) => `<td class="${cls(a.h[h])}">${a.h[h] == null ? 'menunggu' : fmtPct(a.h[h] * 100)}</td>`).join('')}<td class="up">${fmtPct((a.hi / a.p0 - 1) * 100)}</td><td class="dn">${fmtPct((a.lo / a.p0 - 1) * 100)}</td></tr>`;
-    const avg = (h) => { const v = Store.alerts.filter((a) => a.h[h] != null).map((a) => a.h[h] * 100); return v.length ? fmtPct(v.reduce((x, y) => x + y, 0) / v.length) + ' (n=' + v.length + ')' : 'N/A'; };
-    body = `<div class="panel small">Rata-rata setelah 5m: ${avg(5)} · 15m: ${avg(15)} · 1j: ${avg(60)}<br><span class="dim">Hasil hanya muncul setelah horizon selesai. Harga dari polling ticker (resolusi ≈ interval polling), bukan tick-by-tick. Kenaikan setelah sinyal ≠ profit nyata: biaya transaksi, spread, dan slippage belum dihitung. Sampel kecil tidak signifikan secara statistik.</span></div>` + (done.length ? `<div class="wrap"><table class="desk" style="display:table"><thead><tr><th>Pair</th><th>+5m</th><th>+15m</th><th>+1j</th><th>MFE</th><th>MAE</th></tr></thead><tbody>${done.reverse().map(row).join('')}</tbody></table></div>` : empty('Belum ada sinyal dengan horizon selesai.'));
+    const M = Scanner.metrics(), pctf = (x) => (x == null ? 'N/A' : (x * 100).toFixed(0) + '%'), pf = (x) => (x == null ? 'N/A' : fmtPct(x * 100));
+    const done = Store.alerts.filter((a) => a.h[5] != null || (a.na && a.na[5]));
+    const cell = (a, h) => (a.h[h] != null ? `<span class="${cls(a.h[h])}">${fmtPct(a.h[h] * 100)}</span>` : a.na && a.na[h] ? '<span class="dim">data tdk tersedia</span>' : 'menunggu');
+    const row = (a) => `<tr><td>${esc(a.s)}</td><td>${fmtP(a.p0)}</td>${[5, 15, 60].map((h) => `<td>${cell(a, h)}</td>`).join('')}<td class="dn">${pf(a.mae[60] ?? a.mae[15] ?? a.mae[5])}</td><td>${a.held[15] == null ? '—' : a.held[15] ? 'ya' : 'gagal'}</td><td>${esc(a.status)}</td></tr>`;
+    body = `<div class="panel small"><b>Metrik (${M.total} sinyal tercatat)</b>${[5, 15, 60].map((h) => `<div>+${h}m: n=${M.res[h].n} · positif ${pctf(M.res[h].pos)} · median ${pf(M.res[h].med)} · median MAE ${pf(M.res[h].mae)}</div>`).join('')}<div>Breakout gagal bertahan (15m): ${M.brk.fail == null ? 'N/A' : pctf(M.brk.fail)} dari ${M.brk.n}</div><div>Per kategori skor (median +15m): ${M.cat.map((c) => esc(c.k) + ' ' + pf(c.med) + ' (n=' + c.n + ')').join(' · ') || 'N/A'}</div>
+    <div class="warn mt-1">${M.res[15].n < 30 ? 'Sampel < 30: belum cukup untuk menyimpulkan akurasi.' : 'Sampel besar pun tidak menjamin hasil ke depan.'}</div><span class="dim">Evaluasi memakai candle 1m setelah horizon selesai (bukan tick). Return belum dikurangi biaya, spread, dan slippage. Kenaikan setelah sinyal ≠ profit.</span></div>` + (done.length ? `<div class="wrap"><table class="desk" style="display:table"><thead><tr><th>Pair</th><th>Harga sinyal</th><th>+5m</th><th>+15m</th><th>+60m</th><th>MAE</th><th>Breakout bertahan</th><th>Status</th></tr></thead><tbody>${done.reverse().map(row).join('')}</tbody></table></div>` : empty('Belum ada sinyal dengan horizon selesai.'));
   }
   return `<h2>early gainer</h2><div class="scanline"></div><div class="mb-2">${tabs}</div>${body}`;
 }
@@ -94,8 +106,8 @@ function field(k, l, type = 'number', step) { return `<label>${l}</label><input 
 function sel(k, l, o) { return `<label>${l}</label><select data-k="${k}">${o.map(([v, t]) => `<option value="${v}" ${String(Store.s[k]) === String(v) ? 'selected' : ''}>${t}</option>`).join('')}</select>`; }
 function vSettings() {
   const yn = [[true, 'Aktif'], [false, 'Nonaktif']];
-  return `<h2>settings</h2><div class="panel">${field('refreshSec', 'Polling REST ticker (detik, min 5)')}${field('scanSec', 'Interval scan candle (detik, min 10)')}${field('batch', 'Pair per batch scan (5–60)')}${field('minVol', 'Minimum volume 24j (USDT)')}${field('minRvol', 'Minimum relative volume', 'number', '0.1')}${field('minScore', 'Minimum Opportunity Score')}${field('maxChange24', 'Filter kenaikan ekstrem 24j (%)')}${field('cooldownMin', 'Cooldown alert per pair (menit)')}
-  ${sel('pairMode', 'Pair dipantau', [['all', 'Semua Spot USDT aktif'], ['watch', 'Hanya watchlist']])}${sel('notif', 'Notifikasi browser (hanya saat tab terbuka)', yn)}${sel('matrix', 'Animasi Matrix', yn)}${sel('reduced', 'Reduced motion', yn)}${sel('theme', 'Tema', [['matrix', 'Matrix hijau'], ['amber', 'Amber']])}
+  return `<h2>settings</h2><div class="panel">${field('refreshSec', 'Polling REST ticker/fallback (detik, min 5)')}${field('scanSec', 'Interval validasi kandidat (detik, min 10)')}${field('batch', 'Pair divalidasi per batch (5–60)')}${field('minVol', 'Minimum volume 24j (USDT)')}${field('minRvol', 'Minimum relative volume', 'number', '0.1')}${field('minScore', 'Minimum Opportunity Score')}${field('maxChange24', 'Filter kenaikan ekstrem 24j (%)')}${field('cooldownMin', 'Cooldown alert per pair (menit)')}
+  ${sel('strict', 'Konfirmasi breakout ketat (2 close di atas resistance + retest)', yn)}${sel('pairMode', 'Pair dipantau', [['all', 'Semua Spot USDT aktif'], ['watch', 'Hanya watchlist']])}${sel('notif', 'Notifikasi browser (hanya saat tab terbuka)', yn)}${sel('matrix', 'Animasi Matrix', yn)}${sel('reduced', 'Reduced motion', yn)}${sel('theme', 'Tema', [['matrix', 'Matrix hijau'], ['amber', 'Amber']])}
   <button class="btn-t mt-3" data-act="reset">Reset pengaturan</button></div><div class="dim small">Frekuensi UI, polling REST, dan WebSocket dipisah. WebSocket hanya untuk ≤40 pair (watchlist + top gainer).</div>`;
 }
 
@@ -103,24 +115,26 @@ async function vCoin(sym) {
   const el = $('#view'); el.innerHTML = `<h2>${esc(sym)}</h2>` + loading();
   const t = S.tk.get(sym);
   try {
-    const [cs, c1, c5] = await Promise.all([Api.candles(sym, S.g, 200), Api.candles(sym, '1min', 100), Api.candles(sym, '5min', 150)]);
+    const [cs, c1, c5, c15] = await Promise.all([Api.candles(sym, S.g, 200), Api.candles(sym, '1min', 120), Api.candles(sym, '5min', 200), Api.candles(sym, '15min', 100)]);
+    let book = null; try { book = await Api.book(sym); } catch (e) { /* opsional */ }
     if (location.hash !== '#/coin/' + sym) return;
-    const tt = t || { p: cs[cs.length - 1].c, v: 0, ch24: null, b: sym.replace('USDT', '') };
-    const an = Scoring.analyze(c5, tt, Store.s, Date.now()); if (an.score != null) Scanner.scan.set(sym, Object.assign(an, { at: Date.now() }));
-    const k1 = c1.slice(0, -1), n = k1.length, chg = (b) => (n > b ? (k1[n - 1].c / k1[n - 1 - b].c - 1) * 100 : null);
+    const tt = Object.assign({ p: cs[cs.length - 1].c, v: 0, ch24: null, b: sym.replace('USDT', '') }, t || {}, { age: Monitor.age(sym) });
+    const an = Scoring.analyze({ c1, c5, c15, book }, tt, Store.s, Date.now()); if (an.score != null) Scanner.scan.set(sym, Object.assign(an, { at: Date.now() }));
     const hi = Math.max(...cs.slice(-48).map((x) => x.h)), lo = Math.min(...cs.slice(-48).map((x) => x.l));
-    const parts = an.parts ? [['Relative volume', an.parts.rvol, 25], ['Momentum', an.parts.mom, 20], ['Tren EMA/MACD', an.parts.trend, 20], ['Breakout/struktur', an.parts.brk, 15], ['Likuiditas/spread', an.parts.liq, 10], ['Penalti risiko', -an.parts.pen, 10]] : [];
-    const al = Store.alerts.filter((a) => a.s === sym).reverse();
+    const names = { rvol: 'Relative volume', mom: 'Momentum 1m/5m/15m', trend: 'Tren EMA/MACD', brk: 'Breakout & konfirmasi', liq: 'Likuiditas & spread', qual: 'Kualitas candle & volume' };
+    const parts = an.parts ? Object.entries(an.parts).map(([k, p]) => [names[k], p.on ? p.pts : null, p.max]) : [];
+    const al = Store.alerts.filter((a) => a.s === sym).reverse(), m = an.m;
     el.innerHTML = `<h2>${esc(sym)}</h2><div class="panel d-flex justify-content-between"><div><div class="px" id="c-px">${fmtP(tt.p)}</div><div id="c-ch" class="${cls(tt.ch24)}">24j ${fmtPct(tt.ch24)}</div></div><div class="text-end"><button class="btn-t ${Watch.has(sym) ? 'sel' : ''}" data-act="watch" data-s="${esc(sym)}">${Watch.has(sym) ? '★' : '☆'}</button> <a class="btn-t" href="#/early" style="text-decoration:none">←</a></div></div>
     <div class="mb-2">${['1min', '5min', '15min', '1h', '4h'].map((g) => `<button class="btn-t ${S.g === g ? 'sel' : ''}" data-act="gran" data-g="${g}">${g.replace('min', 'm')}</button>`).join(' ')}</div>
     <div id="ch-p" class="chart"></div><div class="dim small">RSI(14)</div><div id="ch-r" class="chart"></div><div class="dim small">MACD histogram (12,26,9)</div><div id="ch-m" class="chart"></div>
-    <div class="panel"><div class="grid3"><span>1m ${fmtPct(chg(1))}</span><span>5m ${fmtPct(chg(5))}</span><span>15m ${fmtPct(chg(15))}</span><span>1j ${fmtPct(chg(60))}</span><span>24j ${fmtPct(tt.ch24)}</span><span>RVOL ${an.m.rvol != null ? an.m.rvol.toFixed(1) + 'x' : 'N/A'}</span><span>RSI ${an.m.rsi != null ? an.m.rsi.toFixed(0) : 'N/A'}</span><span>Spread ${an.m.spread != null ? (an.m.spread * 100).toFixed(3) + '%' : 'N/A'}</span><span>Vol24 ${fmtV(tt.v)}</span></div>
-    <div class="small dim">Zona resistance/support (heuristik: high/low tertinggi 48 candle interval ini, bukan level pasti): R ${fmtP(hi)} · S ${fmtP(lo)}</div></div>
-    <div class="panel"><b>Opportunity Score: <span class="g">${an.score == null ? 'N/A (PROVISIONAL)' : an.score + ' · ' + Scoring.category(an.score)}</span></b><div class="dim small">Kekuatan sinyal, bukan probabilitas profit.</div>
-    ${parts.map(([l, v, m]) => `<div class="small d-flex justify-content-between"><span>${l}</span><span>${v.toFixed(1)} / ${m}</span></div><div class="bar"><i style="width:${Math.abs(v) / m * 100}%;${v < 0 ? 'background:var(--dn)' : ''}"></i></div>`).join('')}
+    <div class="panel"><div class="grid3"><span>1m ${fmtPct(pc(m.ch1))}</span><span>5m ${fmtPct(pc(m.ch5))}</span><span>15m ${fmtPct(pc(m.ch15))}</span><span>1j ${fmtPct(pc(m.ch60))}</span><span>24j ${fmtPct(tt.ch24)}</span><span>RVOL5 ${m.rvol != null ? m.rvol.toFixed(1) + 'x' : 'N/A'}</span><span>RVOL1 ${m.rvol1 != null ? m.rvol1.toFixed(1) + 'x' : 'N/A'}</span><span>RSI ${m.rsi != null ? m.rsi.toFixed(0) : 'N/A'}</span><span>Spread ${m.spread != null ? (m.spread * 100).toFixed(3) + '%' : 'N/A'}</span><span>Slippage 1000$ ${m.slip != null ? (m.slip * 100).toFixed(2) + '%' : 'N/A'}</span><span>Vol24 ${fmtV(tt.v)}</span><span>Umur data ${isFinite(tt.age) ? Math.round(tt.age / 1000) + 's' : 'N/A'}</span></div>
+    <div class="small dim">Resistance acuan breakout (high 48 candle 5m, tanpa 2 candle terakhir): ${m.R ? fmtP(m.R) : 'N/A'} · status breakout: ${esc(m.brk || 'N/A')}. Zona interval chart: R ${fmtP(hi)} · S ${fmtP(lo)} (heuristik, bukan level pasti).</div></div>
+    <div class="panel"><b>Opportunity Score: <span class="g">${an.score == null ? 'N/A' : an.score + ' · ' + Scoring.category(an.score)}${an.provisional ? ' (PROVISIONAL)' : ''}</span></b><div class="dim small">Kekuatan sinyal teknikal, bukan probabilitas profit.${an.base != null ? ' Skor dasar ' + an.base + ' − penalti ' + an.penTotal + '.' : ''}</div>
+    ${parts.map(([l, v, mx]) => `<div class="small d-flex justify-content-between"><span>${l}</span><span>${v == null ? 'N/A (data tidak tersedia)' : v.toFixed(1) + ' / ' + mx}</span></div><div class="bar"><i style="width:${v == null ? 0 : v / mx * 100}%"></i></div>`).join('')}
+    ${an.pen.map((p) => `<div class="small d-flex justify-content-between dn"><span>Penalti: ${esc(p.why)}</span><span>−${p.v}</span></div>`).join('')}
     <div class="small up mt-2">${an.reasons.map(esc).join('<br>')}</div><div class="small warn">${an.warn.map(esc).join('<br>')}</div></div>
     <div class="panel"><b>Histori alert</b>${al.map((a) => `<div class="small">${new Date(a.t0).toLocaleString('id-ID')} · ${esc(a.status)} · skor ${a.score0} · ${fmtP(a.p0)}</div>`).join('') || '<div class="dim small">Belum ada alert untuk pair ini.</div>'}</div>`;
-    Charts.draw({ price: $('#ch-p'), rsi: $('#ch-r'), macd: $('#ch-m') }, cs);
+    try { Charts.draw({ price: $('#ch-p'), rsi: $('#ch-r'), macd: $('#ch-m') }, cs); } catch (e) { $('#ch-p').innerHTML = '<div class="empty">Chart tidak dapat dimuat (' + esc(e.message) + '). Skor dan indikator tetap tersedia.</div>'; }
   } catch (e) { el.innerHTML = `<h2>${esc(sym)}</h2>` + empty('Gagal memuat candle: ' + e.message) + '<button class="btn-t mt-2" data-act="retry">Coba lagi</button>'; }
 }
 
@@ -146,17 +160,17 @@ function topbar() {
 
 async function poll() {
   try {
-    const d = await Api.tickers(), m = new Map();
-    for (const x of d.items) { if (!(x.p > 0)) continue; x.ch24 = x.o > 0 ? (x.p / x.o - 1) * 100 : null; m.set(x.s, x); }
-    S.tk = m; S.last = Date.now(); S.err = null; S.api = d.stale ? 'STALE' : 'OK';
+    const d = await Api.tickers(), m = new Map(), now = Date.now();
+    for (const x of d.items) { if (!(x.p > 0)) continue; x.ch24 = x.o > 0 ? (x.p / x.o - 1) * 100 : null; m.set(x.s, x); Monitor.push(x.s, x.p, x.v, now); }
+    S.tk = m; S.last = now; S.err = null; S.api = d.stale ? 'STALE' : 'OK';
     Scanner.track(m); wsTargets();
   } catch (e) { S.err = e.message; S.api = 'ERROR'; }
   topbar(); if (!location.hash.startsWith('#/coin/')) rq(); else updCoin();
 }
 function updCoin() { const t = S.tk.get(S.detail); if (t && $('#c-px')) { $('#c-px').textContent = fmtP(t.p); const c = $('#c-ch'); c.textContent = '24j ' + fmtPct(t.ch24); c.className = cls(t.ch24); } }
-function wsTargets() {
-  const top = [...S.tk.values()].filter((t) => t.ch24 != null && t.v >= Store.s.minVol).sort((a, b) => b.ch24 - a.ch24).slice(0, 10).map((t) => t.s);
-  Ws.setWanted([...new Set([...(S.detail ? [S.detail] : []), ...Store.watch, ...top])].filter((s) => S.tk.has(s)));
+function wsTargets() { // semua pair likuid (≥25% dari volume minimum) + watchlist + pair yang dibuka
+  const lim = Store.s.minVol / 4, L = [...S.tk.values()].filter((t) => t.v >= lim).sort((a, b) => b.v - a.v).map((t) => t.s);
+  Ws.setWanted([...new Set([...(S.detail ? [S.detail] : []), ...Store.watch, ...L])].filter((s) => S.tk.has(s)));
 }
 let tmP, tmS;
 function loopPoll() { clearTimeout(tmP); tmP = setTimeout(async () => { if (!document.hidden) await poll(); loopPoll(); }, Math.max(5, Store.s.refreshSec) * 1000); }
@@ -201,5 +215,5 @@ window.addEventListener('online', () => { Ws.wake(); poll(); });
 window.addEventListener('error', (e) => { S.err = e.message; });
 window.addEventListener('unhandledrejection', (e) => { S.err = String(e.reason && e.reason.message || e.reason); });
 Ws.onState = () => topbar();
-Ws.onTick = (s, d) => { const t = S.tk.get(s); if (!t) return; t.p = d.p; if (d.bid > 0) t.bid = d.bid; if (d.ask > 0) t.ask = d.ask; if (t.o > 0) t.ch24 = (t.p / t.o - 1) * 100; if (s === S.detail) updCoin(); };
-Rain.start(); applyUi(); route(); poll().then(() => { Ws.connect(); wsTargets(); }); loopPoll(); loopScan(); setTimeout(() => S.tk.size && Scanner.run(S.tk, rq), 1500);
+Ws.onTick = (s, d) => { const t = S.tk.get(s); if (!t) return; Monitor.push(s, d.p, d.q, d.ts); S.last = d.ts; t.p = d.p; if (d.q > 0) t.v = d.q; if (d.bid > 0) t.bid = d.bid; if (d.ask > 0) t.ask = d.ask; if (t.o > 0) t.ch24 = (t.p / t.o - 1) * 100; if (s === S.detail) updCoin(); };
+Rain.start(); applyUi(); route(); poll().then(() => wsTargets()); loopPoll(); loopScan(); setTimeout(() => S.tk.size && Scanner.run(S.tk, rq), 1500);

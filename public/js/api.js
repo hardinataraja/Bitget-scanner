@@ -9,6 +9,7 @@ const Api = {
     } finally { clearTimeout(to); }
   },
   tickers() { return this.j('/api/tickers'); },
+  book(s) { return this.j('/api/book?symbol=' + encodeURIComponent(s)); },
   health() { return this.j('/api/health', 5000); },
   async candles(s, g, l = 150) {
     const d = await this.j('/api/candles?symbol=' + encodeURIComponent(s) + '&granularity=' + g + '&limit=' + l);
@@ -16,35 +17,38 @@ const Api = {
   }
 };
 
-// WebSocket publik Bitget v2 (channel ticker SPOT). Batas: maks 40 simbol agar jumlah subscription kecil.
+// Kumpulan koneksi WebSocket publik Bitget v2 (channel ticker SPOT). Per koneksi maks 400 simbol, subscribe dikirim bertahap
+// (50 arg/pesan, jeda 200ms). Maks 3 koneksi. Heartbeat 'ping' tiap 25s + watchdog 45s tanpa pesan.
 const Ws = {
-  URL: 'wss://ws.bitget.com/v2/ws/public', sock: null, want: new Set(), subbed: new Set(), tries: 0, hb: null, rt: null, state: 'OFFLINE', onTick: null, onState: null, stop: false,
-  set(st) { this.state = st; this.onState && this.onState(st); },
-  connect() {
-    if (this.sock && this.sock.readyState <= 1) return;
-    clearTimeout(this.rt);
-    let ws; try { ws = new WebSocket(this.URL); } catch (e) { return this.retry(); }
-    this.sock = ws; this.set('RECONNECTING');
-    ws.onopen = () => { this.tries = 0; this.subbed.clear(); this.set('CONNECTED'); this.sync(); clearInterval(this.hb); this.hb = setInterval(() => { try { ws.send('ping'); } catch (e) { /* ditutup */ } }, 25000); };
+  URL: 'wss://ws.bitget.com/v2/ws/public', conns: [], onTick: null, onState: null, state: 'OFFLINE', per: 400, lastMsg: 0,
+  mk(i) { return { i, sock: null, subbed: new Set(), want: new Set(), q: [], tries: 0, hb: null, rt: null, tm: null, open: false, last: 0 }; },
+  agg() { const o = this.conns.filter((c) => c.open).length, st = o ? 'CONNECTED' : this.conns.length ? 'RECONNECTING' : 'OFFLINE'; if (st !== this.state) { this.state = st; this.onState && this.onState(st); } },
+  stats() { return { conns: this.conns.length, open: this.conns.filter((c) => c.open).length, subscribed: this.conns.reduce((s, c) => s + (c.open ? c.subbed.size : 0), 0), lastMsg: this.lastMsg }; },
+  setWanted(list) {
+    const L = [...new Set(list)].slice(0, this.per * 3), n = Math.ceil(L.length / this.per);
+    while (this.conns.length < n) { const c = this.mk(this.conns.length); this.conns.push(c); this.connect(c); }
+    this.conns.forEach((c, i) => { c.want = new Set(L.slice(i * this.per, (i + 1) * this.per)); this.sync(c); });
+  },
+  connect(c) {
+    if (c.sock && c.sock.readyState <= 1) return; clearTimeout(c.rt);
+    let ws; try { ws = new WebSocket(this.URL); } catch (e) { return this.retry(c); }
+    c.sock = ws;
+    ws.onopen = () => { c.tries = 0; c.open = true; c.subbed.clear(); c.q = []; c.last = Date.now(); this.agg(); this.sync(c); clearInterval(c.hb); c.hb = setInterval(() => { try { if (Date.now() - c.last > 45000) return ws.close(); ws.send('ping'); } catch (e) { /* ditutup */ } }, 25000); };
     ws.onmessage = (e) => {
-      if (e.data === 'pong') return;
+      c.last = this.lastMsg = Date.now(); if (e.data === 'pong') return;
       let m; try { m = JSON.parse(e.data); } catch (x) { return; }
-      if (m.arg && m.arg.channel === 'ticker' && Array.isArray(m.data)) for (const x of m.data) {
-        const p = parseFloat(x.lastPr); if (!(p > 0)) continue;
-        this.onTick && this.onTick(x.instId, { p, bid: parseFloat(x.bidPr), ask: parseFloat(x.askPr), ts: Date.now() });
-      }
+      if (m.arg && m.arg.channel === 'ticker' && Array.isArray(m.data)) for (const x of m.data) { const p = parseFloat(x.lastPr); if (p > 0) this.onTick && this.onTick(x.instId, { p, bid: parseFloat(x.bidPr), ask: parseFloat(x.askPr), q: parseFloat(x.quoteVolume), ts: c.last }); }
     };
-    ws.onclose = () => { clearInterval(this.hb); this.subbed.clear(); if (!this.stop) { this.set('RECONNECTING'); this.retry(); } };
+    ws.onclose = () => { clearInterval(c.hb); c.open = false; c.subbed.clear(); c.q = []; this.agg(); this.retry(c); };
     ws.onerror = () => { try { ws.close(); } catch (e) { /* noop */ } };
   },
-  retry() { clearTimeout(this.rt); const d = Math.min(30000, 1000 * 2 ** this.tries++); this.rt = setTimeout(() => this.connect(), d); },
-  setWanted(list) { this.want = new Set(list.slice(0, 40)); this.sync(); },
-  sync() {
-    if (!this.sock || this.sock.readyState !== 1) return;
-    const add = [...this.want].filter((s) => !this.subbed.has(s)), del = [...this.subbed].filter((s) => !this.want.has(s));
-    const arg = (s) => ({ instType: 'SPOT', channel: 'ticker', instId: s });
-    if (add.length) { this.sock.send(JSON.stringify({ op: 'subscribe', args: add.map(arg) })); add.forEach((s) => this.subbed.add(s)); }
-    if (del.length) { this.sock.send(JSON.stringify({ op: 'unsubscribe', args: del.map(arg) })); del.forEach((s) => this.subbed.delete(s)); }
+  retry(c) { clearTimeout(c.rt); c.rt = setTimeout(() => this.connect(c), Math.min(60000, 1000 * 2 ** c.tries++) + Math.random() * 500); },
+  sync(c) {
+    if (!c.open) return; const arg = (s) => ({ instType: 'SPOT', channel: 'ticker', instId: s });
+    const add = [...c.want].filter((s) => !c.subbed.has(s)), del = [...c.subbed].filter((s) => !c.want.has(s));
+    for (let i = 0; i < del.length; i += 50) { const ch = del.slice(i, i + 50); c.q.push(() => c.sock.send(JSON.stringify({ op: 'unsubscribe', args: ch.map(arg) }))); ch.forEach((s) => c.subbed.delete(s)); }
+    for (let i = 0; i < add.length; i += 50) { const ch = add.slice(i, i + 50); c.q.push(() => c.sock.send(JSON.stringify({ op: 'subscribe', args: ch.map(arg) }))); ch.forEach((s) => c.subbed.add(s)); }
+    if (!c.tm) c.tm = setInterval(() => { const f = c.q.shift(); if (!f) { clearInterval(c.tm); c.tm = null; return; } try { f(); } catch (e) { /* ditutup */ } }, 200);
   },
-  wake() { if (!this.sock || this.sock.readyState > 1) { this.tries = 0; this.connect(); } }
+  wake() { this.conns.forEach((c) => { if (!c.sock || c.sock.readyState > 1) { c.tries = 0; this.connect(c); } }); }
 };
