@@ -66,7 +66,8 @@ function vEarly() {
     const now = Date.now(), c = Store.s;
     const cands = [...S.tk.values()].filter((t) => Scanner.quality(t, now)).map((t) => ({ t, p: Monitor.priority(t, now) })).filter((x) => x.p.pri >= 2).sort((a, b) => b.p.pri - a.p.pri).slice(0, 8);
     const rows = [...Scanner.scan.entries()].filter(([s, a]) => a.score != null && S.tk.has(s)).map(([s]) => S.tk.get(s)).filter((t) => { const a = Scanner.scan.get(t.s); return (a.m.rvol || 0) >= c.minRvol && a.score >= c.minScore && t.v >= c.minVol && !(t.ch24 > c.maxChange24); }).sort((a, b) => Scanner.scan.get(b.s).score - Scanner.scan.get(a.s).score).slice(0, 40);
-    body = `<div class="panel small"><b>Kandidat momentum (Tahap A, belum tentu tervalidasi)</b>${cands.length ? cands.map((x) => `<div class="d-flex justify-content-between"><a href="#/coin/${esc(x.t.s)}">${esc(x.t.s)}</a><span>1m ${fmtPct(pc(x.p.d1))} · 5m ${fmtPct(pc(x.p.d5))} · vol ${x.p.vr != null ? x.p.vr.toFixed(1) + 'x' : 'N/A'} · pri ${x.p.pri.toFixed(1)}</span></div>`).join('') : '<span class="dim">Belum ada kandidat (butuh ±1–5 menit data sesi untuk menghitung perubahan jangka pendek).</span>'}</div>
+    body = `<div class="term" id="term"><div class="thead"><span class="dn">●</span> <span class="warn">●</span> <span class="up">●</span> root@bitget-scanner: ~/early-scan</div><div class="tbody"></div><div class="tstat"></div></div>
+    <div class="panel small"><b>Kandidat momentum (Tahap A, belum tentu tervalidasi)</b><br>${cands.length ? cands.map((x) => `<div class="d-flex justify-content-between"><a href="#/coin/${esc(x.t.s)}">${esc(x.t.s)}</a><span>1m ${fmtPct(pc(x.p.d1))} · 5m ${fmtPct(pc(x.p.d5))} · vol ${x.p.vr != null ? x.p.vr.toFixed(1) + 'x' : 'N/A'} · pri ${x.p.pri.toFixed(1)}</span></div>`).join('') : '<span class="dim">Belum ada kandidat (butuh ±1–5 menit data sesi untuk menghitung perubahan jangka pendek).</span>'}</div>
     <div class="dim small mb-2">Tervalidasi: ${Scanner.scan.size} pair. Filter: skor≥${c.minScore} (bukan provisional), RVOL≥${c.minRvol}, 24j≤${c.maxChange24}%.${Scanner.busy ? ' <span class="g">validasi berjalan…</span>' : ''}${Scanner.lastErr ? ' <span class="warn">' + esc(Scanner.lastErr) + '</span>' : ''}</div>` + (rows.length ? table(rows) : S.tk.size ? empty(Scanner.scan.size ? 'Belum ada pair yang memenuhi filter saat ini.' : 'Scanner sedang mengumpulkan candle…') : loading());
   } else if (S.tab === 'alert') {
     const al = Store.alerts.slice().reverse();
@@ -146,7 +147,10 @@ function render() {
   Charts.clear();
   const f = { dash: vDash, early: vEarly, top: vTop, watch: vWatch, settings: vSettings }[h] || vDash;
   if (h === 'settings' && el.querySelector('[data-k]:focus')) return; // jangan bongkar form saat mengetik
+  const keep = h === 'early' && Term.el && document.contains(Term.el) ? Term.el : null; // pertahankan elemen terminal agar tidak berkedip/scroll reset
+  const kb = keep && keep.querySelector('.tbody'), kst = kb ? kb.scrollTop : 0, kbottom = kb ? kb.scrollHeight - kb.scrollTop - kb.clientHeight < 40 : true;
   el.innerHTML = f();
+  const nt = document.getElementById('term'); if (keep && nt) { nt.replaceWith(keep); Term.el = keep; const b2 = keep.querySelector('.tbody'); b2.scrollTop = kbottom ? b2.scrollHeight : kst; } Term.mount();
 }
 function rq() { if (!S.rafQ) { S.rafQ = true; requestAnimationFrame(render); } }
 function route() { const h = location.hash; const m = h.match(/^#\/coin\/([A-Z0-9]{2,20}USDT)$/); if (m) { S.detail = m[1]; vCoin(m[1]); document.querySelectorAll('[data-nav]').forEach((a) => a.classList.remove('act')); } else render(); window.scrollTo(0, 0); }
@@ -164,7 +168,8 @@ async function poll() {
     for (const x of d.items) { if (!(x.p > 0)) continue; x.ch24 = x.o > 0 ? (x.p / x.o - 1) * 100 : null; m.set(x.s, x); Monitor.push(x.s, x.p, x.v, now); }
     S.tk = m; S.last = now; S.err = null; S.api = d.stale ? 'STALE' : 'OK';
     Scanner.track(m); wsTargets();
-  } catch (e) { S.err = e.message; S.api = 'ERROR'; }
+    if ((S.pn = (S.pn || 0) + 1) % 4 === 1) Term.push('rest tickers ok pairs=' + m.size + ' stale=' + !!d.stale, 'd');
+  } catch (e) { S.err = e.message; S.api = 'ERROR'; Term.push('[ERR ] rest tickers: ' + e.message, 'e'); }
   topbar(); if (!location.hash.startsWith('#/coin/')) rq(); else updCoin();
 }
 function updCoin() { const t = S.tk.get(S.detail); if (t && $('#c-px')) { $('#c-px').textContent = fmtP(t.p); const c = $('#c-ch'); c.textContent = '24j ' + fmtPct(t.ch24); c.className = cls(t.ch24); } }
@@ -174,7 +179,7 @@ function wsTargets() { // semua pair likuid (≥25% dari volume minimum) + watch
 }
 let tmP, tmS;
 function loopPoll() { clearTimeout(tmP); tmP = setTimeout(async () => { if (!document.hidden) await poll(); loopPoll(); }, Math.max(5, Store.s.refreshSec) * 1000); }
-function loopScan() { clearTimeout(tmS); tmS = setTimeout(async () => { if (!document.hidden && S.tk.size) await Scanner.run(S.tk, rq); loopScan(); }, Math.max(10, Store.s.scanSec) * 1000); }
+function loopScan() { clearTimeout(tmS); Scanner.nextAt = Date.now() + Math.max(10, Store.s.scanSec) * 1000; tmS = setTimeout(async () => { if (!document.hidden && S.tk.size) await Scanner.run(S.tk, rq); loopScan(); }, Math.max(10, Store.s.scanSec) * 1000); }
 
 document.addEventListener('click', (e) => {
   const b = e.target.closest('[data-act]'); if (!b) return; const a = b.dataset.act, s = b.dataset.s;
@@ -214,6 +219,8 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) { Ws
 window.addEventListener('online', () => { Ws.wake(); poll(); });
 window.addEventListener('error', (e) => { S.err = e.message; });
 window.addEventListener('unhandledrejection', (e) => { S.err = String(e.reason && e.reason.message || e.reason); });
-Ws.onState = () => topbar();
+Ws.onState = (st) => { topbar(); const w = Ws.stats(); Term.push('ws state=' + st + ' conns=' + w.open + '/' + w.conns, st === 'CONNECTED' ? 'ok' : 'w'); };
 Ws.onTick = (s, d) => { const t = S.tk.get(s); if (!t) return; Monitor.push(s, d.p, d.q, d.ts); S.last = d.ts; t.p = d.p; if (d.q > 0) t.v = d.q; if (d.bid > 0) t.bid = d.bid; if (d.ask > 0) t.ask = d.ask; if (t.o > 0) t.ch24 = (t.p / t.o - 1) * 100; if (s === S.detail) updCoin(); };
+Term.push('boot: bitget-scanner v2 | batch=' + Store.s.batch + ' scan=' + Store.s.scanSec + 's strict=' + Store.s.strict + ' minVol=' + Store.s.minVol, 'ok'); Term.push('init: monitor tahap A (ticker WS+REST), validasi tahap B (candle 1m/5m/15m)', 'd');
+setInterval(() => { if (!Scanner.busy && Term.el) Term.setStatus(S.tk.size ? 'idle - batch berikutnya ' + Math.max(0, Math.round((Scanner.nextAt - Date.now()) / 1000)) + 's' : 'menunggu data ticker...'); }, 1000);
 Rain.start(); applyUi(); route(); poll().then(() => wsTargets()); loopPoll(); loopScan(); setTimeout(() => S.tk.size && Scanner.run(S.tk, rq), 1500);

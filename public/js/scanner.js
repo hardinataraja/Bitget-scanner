@@ -1,6 +1,7 @@
 /* TAHAP B: validasi kandidat (candle 1m/5m/15m + order book) dan mesin status alert. */
 const Scanner = {
   scan: new Map(), cursor: 0, busy: false, pauseUntil: 0, lastErr: null, factor: 1, inflight: new Set(), st: { req: 0, err: 0, cycles: 0, lastBatch: 0, queue: 0 },
+  log(x, c) { if (typeof Term !== 'undefined') Term.push(x, c); },
   quality(t, now) { const sp = t.bid > 0 && t.ask > 0 ? (t.ask - t.bid) / t.bid : 0; return t.v >= Store.s.minVol && sp <= 0.01 && Monitor.age(t.s, now) <= 60000; },
   open(s) { return Store.alerts.find((a) => a.s === s && a.live !== false && !a.closed); },
   // Alokasi batch: 30% Top Gainer+watchlist (yang paling lama tidak dianalisis), 50% kandidat prioritas (momentum/volume baru),
@@ -22,10 +23,13 @@ const Scanner = {
     const samp = el.slice().sort((a, b) => b.v - a.v);
     for (let i = 0; i < samp.length && out.size < B; i++) add(samp[(this.cursor + i) % samp.length], 'sampling');
     this.cursor = samp.length ? (this.cursor + Math.ceil(B / 5)) % samp.length : 0;
+    this.why = out;
     return [...out.keys()];
   },
   async validate(s, tk) {
     this.inflight.add(s);
+    const t0 = Date.now(), why = (this.why && this.why.get(s)) || '-';
+    this.log('> fetch ' + s + ' [' + why + '] 5m x200, 1m x120', 'd');
     try {
       const [c5, c1] = await Promise.all([Api.candles(s, '5min', 200), Api.candles(s, '1min', 120)]);
       const tt = () => Object.assign({}, tk.get(s), { age: Monitor.age(s) }), D = { c1, c5, c15: null, book: null };
@@ -34,22 +38,32 @@ const Scanner = {
       if (an.score != null && an.score >= 60) { try { D.book = await Api.book(s); an = Scoring.analyze(D, tt(), Store.s, Date.now()); } catch (e) { /* order book opsional */ } }
       an.at = Date.now(); an.seen = Monitor.age(s);
       this.scan.set(s, an); this.signal(s, an, tt());
+      const m = an.m || {}, f = (x) => (x == null ? 'n/a' : (x * 100).toFixed(2) + '%');
+      if (an.score == null) this.log('  -> ' + s + ' skor=N/A (' + (an.reasons[0] || '') + ')', 'w');
+      else this.log('  -> ' + s + ' skor=' + an.score + (an.provisional ? ' PROV' : '') + ' (dasar ' + an.base + ' -' + an.penTotal + ') rvol=' + (m.rvol != null ? m.rvol.toFixed(1) + 'x' : 'n/a') + ' ch5=' + f(m.ch5) + ' brk=' + m.brk + (m.book ? ' book=ok' : '') + ' ' + (Date.now() - t0) + 'ms', an.score >= Store.s.minScore && !an.provisional ? 'ok' : '');
     } finally { this.inflight.delete(s); }
   },
   async run(tk, onProgress) {
     if (this.busy || Date.now() < this.pauseUntil) return;
     this.busy = true; let errs = 0;
-    const list = this.pick(tk, Date.now()); this.st.lastBatch = list.length; let i = 0;
+    const cyc0 = Date.now(), nA = Store.alerts.length, list = this.pick(tk, Date.now()); this.st.lastBatch = list.length; let i = 0, done = 0;
+    const cnt = (k) => list.filter((x) => this.why && this.why.get(x) === k).length;
+    this.log('$ ./early-scan --batch=' + list.length + ' --factor=' + this.factor.toFixed(2) + '  (top/watch=' + cnt('top/watch') + ' kandidat=' + cnt('kandidat') + ' sampling=' + cnt('sampling') + ')', 'ok');
+    if (typeof Term !== 'undefined') Term.setStatus('scanning', [0, list.length]);
     const worker = async () => {
       while (i < list.length && Date.now() >= this.pauseUntil) {
         const s = list[i++]; this.st.queue = list.length - i; this.st.req++;
-        try { await this.validate(s, tk); this.lastErr = null; } catch (e) { errs++; this.st.err++; this.lastErr = e.message; if (/429|cooldown/i.test(e.message)) this.pauseUntil = Date.now() + 30000; }
+        try { await this.validate(s, tk); this.lastErr = null; } catch (e) { errs++; this.st.err++; this.lastErr = e.message; this.log('[ERR ] ' + s + ': ' + e.message, 'e'); if (/429|cooldown/i.test(e.message)) { this.pauseUntil = Date.now() + 30000; this.log('[WARN] rate limit -> jeda 30 detik', 'w'); } }
+        done++; if (typeof Term !== 'undefined') Term.setStatus('scanning ' + s, [done, list.length]);
         onProgress && onProgress();
       }
     };
     await Promise.all([worker(), worker(), worker(), worker()]);
     this.factor = errs ? Math.max(0.25, this.factor / 2) : Math.min(1, this.factor + 0.25); // backpressure
     this.st.cycles++; this.st.queue = 0;
+    if (errs) this.log('[WARN] backpressure: faktor batch -> ' + this.factor.toFixed(2), 'w');
+    this.log('# siklus #' + this.st.cycles + ' selesai: tervalidasi=' + done + ' error=' + errs + ' alert_baru=' + (Store.alerts.length - nA) + ' (' + (Date.now() - cyc0) + ' ms)', errs ? 'w' : 'd');
+    if (typeof Term !== 'undefined') Term.setStatus('idle');
     try { await this.evaluate(); } catch (e) { /* evaluasi dicoba lagi pada siklus berikut */ }
     this.busy = false; Store.saveA(); onProgress && onProgress();
   },
@@ -66,6 +80,7 @@ const Scanner = {
       const ok = !an.provisional && an.score >= c.minScore && (m.rvol || 0) >= c.minRvol && !(t.ch24 > c.maxChange24) && t.v >= c.minVol && (t.age || 0) <= 60000;
       if (ok && (!last || now - last.t0 > c.cooldownMin * 60000)) {
         Store.alerts.push({ v: 2, id: s + '-' + now, s, b: t.b, t0: now, p0: t.p, last: t.p, hi: t.p, lo: t.p, score0: an.score, score: an.score, peak: an.score, rvol0: m.rvol, R: m.brk !== 'none' ? m.R : null, brkSeen: m.brk !== 'none', reasons: an.reasons.slice(0, 5), warn: an.warn.slice(0, 4), status: m.brk === 'confirmed' ? 'BREAKOUT CONFIRMED' : m.brk === 'detected' ? 'BREAKOUT DETECTED' : 'NEW SIGNAL', h: {}, mfe: {}, mae: {}, held: {}, below: 0, dataAge: t.age || 0, live: true, closed: false, inval: 'Harga ≤ ' + (t.p * 0.985).toPrecision(5) + ' (−1.5%), skor <45 dua kali, atau close 5m di bawah resistance acuan' });
+        this.log('[ALERT] ' + s + ' ' + Store.alerts[Store.alerts.length - 1].status + ' @' + t.p + ' skor=' + an.score + ' rvol=' + (m.rvol || 0).toFixed(1) + 'x', 'a');
         if (c.notif && typeof Notification !== 'undefined' && Notification.permission === 'granted') { try { new Notification('Early Gainer: ' + s, { body: 'Skor ' + an.score + ' | RVOL ' + (m.rvol || 0).toFixed(1) + 'x' }); } catch (e) { /* noop */ } }
       }
       return;
@@ -78,13 +93,14 @@ const Scanner = {
     else if (a.below >= 2) inv = 'Skor <45 dua analisis berturut-turut';
     else if (a.brkSeen && a.R && m.lastClose5 < a.R) inv = 'Candle 5m ditutup di bawah resistance acuan ' + a.R.toPrecision(5);
     const prev = a.status;
-    if (inv) { a.status = 'INVALIDATED'; a.invReason = inv; a.live = false; a.invAt = now; return; }
+    if (inv) { this.log('[STAT ] ' + s + ': ' + prev + ' -> INVALIDATED (' + inv + ')', 'e'); a.status = 'INVALIDATED'; a.invReason = inv; a.live = false; a.invAt = now; return; }
     if (m.brk === 'confirmed') a.status = 'BREAKOUT CONFIRMED';
     else if (prev === 'BREAKOUT CONFIRMED' || prev === 'BREAKOUT DETECTED') a.status = m.brk === 'detected' ? 'BREAKOUT DETECTED' : 'WEAKENING'; // syarat breakout gagal -> tidak dipertahankan
     else if (an.score <= a.peak - 10) a.status = 'WEAKENING';
     else if (m.brk === 'detected') a.status = 'BREAKOUT DETECTED';
     else if (an.score >= a.score0 + 5 && t.p > a.p0 && m.ch5 > 0) a.status = 'MOMENTUM STRENGTHENING';
     else a.status = 'NEW SIGNAL';
+    if (prev !== a.status) this.log('[STAT ] ' + s + ': ' + prev + ' -> ' + a.status, 'a');
     if (now - a.t0 > 65 * 60000) a.live = false;
   },
   // Harga terakhir untuk tampilan (dari polling/WS; BUKAN dasar evaluasi).
